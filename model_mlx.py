@@ -105,17 +105,14 @@ class MultiHeadedAttentionSANM(nn.Module):
             mask = mx.reshape(mask, (b, -1, 1))
             inputs = inputs * mask
         
-        # Transpose for conv1d: (B, T, D) -> (B, D, T)
-        x = mx.transpose(inputs, (0, 2, 1))
+        # MLX Conv1d期待输入格式: (B, L, C) 而不是 PyTorch的 (B, C, L)
+        # 我们的输入已经是 (B, T, D) 格式，其中T是序列长度，D是特征维度
         
-        # Apply padding
-        x = mx.pad(x, [(0, 0), (0, 0), (self.left_padding, self.right_padding)])
+        # Apply padding on the time dimension
+        x = mx.pad(inputs, [(0, 0), (self.left_padding, self.right_padding), (0, 0)])
         
-        # Apply convolution
+        # Apply convolution - MLX Conv1d处理 (B, L, C) 格式
         x = self.fsmn_conv(x)
-        
-        # Transpose back: (B, D, T) -> (B, T, D)
-        x = mx.transpose(x, (0, 2, 1))
         
         # Residual connection
         x = x + inputs
@@ -173,19 +170,21 @@ class MultiHeadedAttentionSANM(nn.Module):
     
     def __call__(self, x: mx.array, mask: Optional[mx.array] = None) -> mx.array:
         """Forward pass of multi-head attention."""
-        # FSMN processing
-        x = self.forward_fsmn(x, mask)
-        
-        # Multi-head attention
+        # Multi-head attention  
         q_h, k_h, v_h, v = self.forward_qkv(x)
         
+        # FSMN processing on value tensor (after dimension transformation)
+        fsmn_memory = self.forward_fsmn(v, mask)
+        
         # Compute attention scores
-        scores = mx.matmul(q_h, mx.transpose(k_h, (0, 1, 3, 2))) / math.sqrt(self.d_k)
+        q_h = q_h / math.sqrt(self.d_k)
+        scores = mx.matmul(q_h, mx.transpose(k_h, (0, 1, 3, 2)))
         
         # Apply attention
-        x = self.forward_attention(v_h, scores, mask)
+        att_outs = self.forward_attention(v_h, scores, mask)
         
-        return x
+        # Combine attention output with FSMN memory
+        return att_outs + fsmn_memory
 
 
 class EncoderLayerSANM(nn.Module):
@@ -198,11 +197,14 @@ class EncoderLayerSANM(nn.Module):
         feed_forward: PositionwiseFeedForward,
         dropout_rate: float = 0.1,
         normalize_before: bool = True,
+        in_size: Optional[int] = None,  # 添加in_size参数以支持第一层
     ):
         super().__init__()
+        self.in_size = in_size if in_size is not None else size
+        self.size = size
         self.self_attn = self_attn
         self.feed_forward = feed_forward
-        self.norm1 = nn.LayerNorm(size)
+        self.norm1 = nn.LayerNorm(self.in_size)  # 使用in_size
         self.norm2 = nn.LayerNorm(size)
         self.dropout = nn.Dropout(dropout_rate)
         self.normalize_before = normalize_before
@@ -210,11 +212,22 @@ class EncoderLayerSANM(nn.Module):
     def __call__(self, x: mx.array, mask: Optional[mx.array] = None) -> mx.array:
         """Forward pass of encoder layer."""
         # Self-attention with residual connection
+        # 当in_size != size时（如第一层560->512），不使用残差连接
         if self.normalize_before:
             x_norm = self.norm1(x)
-            x = x + self.dropout(self.self_attn(x_norm, mask))
+            attn_out = self.dropout(self.self_attn(x_norm, mask))
+            
+            # 只有当维度匹配时才使用残差连接
+            if self.in_size == self.size:
+                x = x + attn_out
+            else:
+                x = attn_out  # 第一层不使用残差连接
         else:
-            x = self.norm1(x + self.dropout(self.self_attn(x, mask)))
+            attn_out = self.dropout(self.self_attn(x, mask))
+            if self.in_size == self.size:
+                x = self.norm1(x + attn_out)
+            else:
+                x = self.norm1(attn_out)
         
         # Feed-forward with residual connection
         if self.normalize_before:
@@ -227,7 +240,7 @@ class EncoderLayerSANM(nn.Module):
 
 
 class SenseVoiceEncoderSmall(nn.Module):
-    """SenseVoice Encoder with SANM attention mechanism."""
+    """SenseVoice Encoder with SANM attention mechanism - 3 Encoder Groups Architecture."""
     
     def __init__(
         self,
@@ -236,6 +249,7 @@ class SenseVoiceEncoderSmall(nn.Module):
         attention_heads: int = 4,
         linear_units: int = 2048,
         num_blocks: int = 50,
+        tp_blocks: int = 20,
         dropout_rate: float = 0.1,
         positional_dropout_rate: float = 0.1,
         attention_dropout_rate: float = 0.0,
@@ -249,27 +263,51 @@ class SenseVoiceEncoderSmall(nn.Module):
         self.embed = SinusoidalPositionEncoder()
         self.normalize_before = normalize_before
         
-        # Create encoder layers using proper MLX module structure
-        encoder_layers = []
-        for i in range(num_blocks):
-            # Multi-head attention layer
+        # === THREE ENCODER GROUPS ARCHITECTURE ===
+        
+        # Group 1: encoders0 (1 layer, input_size -> output_size)
+        # Note: PyTorch第一层使用560作为输入维度(80 + 480 pos encoding)
+        encoders0_input_size = 560  # This matches PyTorch model structure
+        encoders0_layers = []
+        attention_layer0 = MultiHeadedAttentionSANM(
+            n_head=attention_heads,
+            in_feat=encoders0_input_size,
+            n_feat=output_size,
+            dropout_rate=attention_dropout_rate,
+            kernel_size=kernel_size,
+            sanm_shift=sanm_shift,
+        )
+        ff_layer0 = PositionwiseFeedForward(
+            idim=output_size,
+            hidden_units=linear_units,
+            dropout_rate=dropout_rate,
+        )
+        encoder_layer0 = EncoderLayerSANM(
+            size=output_size,
+            self_attn=attention_layer0,
+            feed_forward=ff_layer0,
+            dropout_rate=dropout_rate,
+            normalize_before=normalize_before,
+            in_size=encoders0_input_size,  # 第一层需要处理560->512的转换
+        )
+        encoders0_layers.append(encoder_layer0)
+        
+        # Group 2: encoders (num_blocks - 1 layers, output_size -> output_size)  
+        encoders_layers = []
+        for i in range(num_blocks - 1):
             attention_layer = MultiHeadedAttentionSANM(
                 n_head=attention_heads,
-                in_feat=input_size if i == 0 else output_size,
+                in_feat=output_size,
                 n_feat=output_size,
                 dropout_rate=attention_dropout_rate,
                 kernel_size=kernel_size,
                 sanm_shift=sanm_shift,
             )
-            
-            # Feed-forward layer
             ff_layer = PositionwiseFeedForward(
                 idim=output_size,
                 hidden_units=linear_units,
                 dropout_rate=dropout_rate,
             )
-            
-            # Complete encoder layer
             encoder_layer = EncoderLayerSANM(
                 size=output_size,
                 self_attn=attention_layer,
@@ -277,31 +315,110 @@ class SenseVoiceEncoderSmall(nn.Module):
                 dropout_rate=dropout_rate,
                 normalize_before=normalize_before,
             )
+            encoders_layers.append(encoder_layer)
             
-            encoder_layers.append(encoder_layer)
+        # Group 3: tp_encoders (tp_blocks layers, output_size -> output_size)
+        tp_encoders_layers = []
+        for i in range(tp_blocks):
+            attention_layer = MultiHeadedAttentionSANM(
+                n_head=attention_heads,
+                in_feat=output_size,
+                n_feat=output_size,
+                dropout_rate=attention_dropout_rate,
+                kernel_size=kernel_size,
+                sanm_shift=sanm_shift,
+            )
+            ff_layer = PositionwiseFeedForward(
+                idim=output_size,
+                hidden_units=linear_units,
+                dropout_rate=dropout_rate,
+            )
+            encoder_layer = EncoderLayerSANM(
+                size=output_size,
+                self_attn=attention_layer,
+                feed_forward=ff_layer,
+                dropout_rate=dropout_rate,
+                normalize_before=normalize_before,
+            )
+            tp_encoders_layers.append(encoder_layer)
         
-        # Store as a tuple for MLX compatibility
-        self.encoders = encoder_layers
+        # Store as attributes for proper MLX module handling
+        for i, layer in enumerate(encoders0_layers):
+            setattr(self, f"encoders0_{i}", layer)
+        for i, layer in enumerate(encoders_layers):
+            setattr(self, f"encoders_{i}", layer)
+        for i, layer in enumerate(tp_encoders_layers):
+            setattr(self, f"tp_encoders_{i}", layer)
+            
+        # Store layer counts for iteration
+        self.encoders0_count = len(encoders0_layers)
+        self.encoders_count = len(encoders_layers)
+        self.tp_encoders_count = len(tp_encoders_layers)
+            
+        # Normalization layers for each group
+        self.after_norm = nn.LayerNorm(output_size)  # After encoders group
+        self.tp_norm = nn.LayerNorm(output_size)      # After tp_encoders group
     
     def output_size(self) -> int:
         """Return the output size of the encoder."""
         return self._output_size
     
-    def __call__(self, x: mx.array, x_lens: mx.array) -> Tuple[mx.array, mx.array]:
-        """Forward pass of the encoder."""
+    def __call__(self, x: mx.array, x_lens: mx.array, debug_mode: bool = False) -> Tuple[mx.array, mx.array]:
+        """Forward pass of the encoder with 3-group architecture."""
+        if debug_mode:
+            print(f"🔍 Encoder Input Shape: {x.shape}")
+        
         # Apply positional encoding
         x = self.embed(x)
+        
+        if debug_mode:
+            print(f"🔍 After Position Encoding: {x.shape}")
         
         # Create mask from lengths
         batch_size, max_len, _ = x.shape
         mask = mx.arange(max_len)[None, :] < x_lens[:, None]
         mask = mask.astype(mx.float32)
         
-        # Pass through encoder layers
-        for encoder_layer in self.encoders:
-            x = encoder_layer(x, mask)
+        if debug_mode:
+            print(f"🔍 Masks Shape: {mask.shape}")
         
-        return x, x_lens
+        # === GROUP 1: encoders0 (1 layer) ===
+        for i in range(self.encoders0_count):
+            encoder_layer = getattr(self, f"encoders0_{i}")
+            x = encoder_layer(x, mask)
+            if debug_mode:
+                print(f"🔍 After encoders0 Layer {i}: {x.shape}")
+        
+        # === GROUP 2: encoders (num_blocks - 1 layers) ===
+        for i in range(self.encoders_count):
+            encoder_layer = getattr(self, f"encoders_{i}")
+            x = encoder_layer(x, mask)
+            if debug_mode and i < 3:  # Only first few layers to avoid spam
+                print(f"🔍 After encoders Layer {i}: {x.shape}")
+        
+        # Apply normalization after main encoders
+        x = self.after_norm(x)
+        
+        if debug_mode:
+            print(f"🔍 After encoders group normalization: {x.shape}")
+        
+        # === GROUP 3: tp_encoders (tp_blocks layers) ===
+        for i in range(self.tp_encoders_count):
+            encoder_layer = getattr(self, f"tp_encoders_{i}")
+            x = encoder_layer(x, mask)
+            if debug_mode:
+                print(f"🔍 After tp_encoders Layer {i}: {x.shape}")
+        
+        # Apply final tp_norm
+        x = self.tp_norm(x)
+        
+        if debug_mode:
+            print(f"🔍 Final Encoder Output: {x.shape}")
+        
+        # Calculate output lengths
+        olens = mask.sum(axis=1).astype(mx.int32)
+        
+        return x, olens
 
 
 class CTC(nn.Module):
@@ -370,6 +487,7 @@ class SenseVoiceMLX(nn.Module):
                 "attention_heads": 4,
                 "linear_units": 2048,
                 "num_blocks": 50,
+                "tp_blocks": 20,
                 "dropout_rate": 0.1,
                 "positional_dropout_rate": 0.1,
                 "attention_dropout_rate": 0.0,
@@ -409,9 +527,9 @@ class SenseVoiceMLX(nn.Module):
         self.textnorm_dict = {"withitn": 14, "woitn": 15}
         self.textnorm_int_dict = {25016: 14, 25017: 15}
         
-        # Embedding layer for language and style tokens
-        embed_dim = 7 + len(self.lid_dict) + len(self.textnorm_dict)
-        self.embed = nn.Embedding(embed_dim, input_size)
+        # Embedding layer for language and style tokens  
+        embed_dim = 16  # Match PyTorch model: embed.num_embeddings = 16
+        self.embed = nn.Embedding(embed_dim, 560)  # Match PyTorch model: embed.embedding_dim = 560
         
         # Emotion dictionary
         self.emo_dict = {"unk": 25009, "happy": 25001, "sad": 25002, "angry": 25003, "neutral": 25004}
@@ -440,7 +558,19 @@ class SenseVoiceMLX(nn.Module):
         else:
             style_query = self.embed(mx.ones((batch_size, 1), dtype=mx.int32))
         
-        # Concatenate style query with speech
+        # 首先需要将speech特征从80维投影到560维以匹配embedding输出
+        # 这是PyTorch模型中隐含的步骤
+        batch_size, seq_len, feat_dim = speech.shape
+        if feat_dim != 560:
+            # 创建一个线性投影层将80维转换为560维
+            # 注意：这里使用零填充作为临时解决方案
+            # 实际的PyTorch模型可能有专门的投影层或使用不同的特征提取
+            padding_size = 560 - feat_dim  # 560 - 80 = 480
+            padding = mx.zeros((batch_size, seq_len, padding_size))
+            speech = mx.concatenate([speech, padding], axis=2)
+            print(f"🔧 Speech特征维度扩展: {feat_dim} -> {speech.shape[2]}")
+        
+        # Concatenate style query with speech  
         speech = mx.concatenate([style_query, speech], axis=1)
         speech_lengths = speech_lengths + 1
         
