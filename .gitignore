@@ -29,3 +29,25 @@ examples/aishell/llm_asr_nar/*
 api.log
 api.pid
 .claude/settings.local.json
+
+# MLX model weights
+*.safetensors
+sensevoice_mlx*.safetensors
+
+# Debug and test files
+debug_*.py
+check_*.py
+test_*.py
+verify_*.py
+trace_*.py
+final_*.py
+mel_filter_*.py
+regenerate_*.py
+
+# Temporary verification outputs
+verification_output_*/
+
+# Old frontend versions
+utils/frontend_mlx.py
+utils/frontend_mlx_v2.py
+utils/fbank_simple.py
