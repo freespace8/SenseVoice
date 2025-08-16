@@ -13,7 +13,7 @@ print("MLX Model Definition Script Initialized.")
 class SinusoidalPositionEncoder(nn.Module):
     """Sinusoidal positional encoding for transformer models."""
     
-    def __init__(self, d_model: int = 80, dropout_rate: float = 0.1):
+    def __init__(self, d_model: int = 560, dropout_rate: float = 0.1):
         super().__init__()
         self.d_model = d_model
         self.dropout_rate = dropout_rate
@@ -266,13 +266,14 @@ class SenseVoiceEncoderSmall(nn.Module):
         # === THREE ENCODER GROUPS ARCHITECTURE ===
         
         # Group 1: encoders0 (1 layer, input_size -> output_size)
-        # Note: PyTorch第一层使用560作为输入维度(80 + 480 pos encoding)
-        encoders0_input_size = 560  # This matches PyTorch model structure
+        # CRITICAL: The first encoder layer in PyTorch takes 80-dim input
+        # and projects it to 512-dim internally via linear_q_k_v (80 -> 512*3)
+        # This matches the PyTorch model.py lines 484-491
         encoders0_layers = []
         attention_layer0 = MultiHeadedAttentionSANM(
             n_head=attention_heads,
-            in_feat=encoders0_input_size,
-            n_feat=output_size,
+            in_feat=input_size,  # 80-dim input from Fbank
+            n_feat=output_size,  # 512-dim output
             dropout_rate=attention_dropout_rate,
             kernel_size=kernel_size,
             sanm_shift=sanm_shift,
@@ -288,7 +289,7 @@ class SenseVoiceEncoderSmall(nn.Module):
             feed_forward=ff_layer0,
             dropout_rate=dropout_rate,
             normalize_before=normalize_before,
-            in_size=encoders0_input_size,  # 第一层需要处理560->512的转换
+            in_size=input_size,  # 第一层处理80->512的转换
         )
         encoders0_layers.append(encoder_layer0)
         
@@ -468,7 +469,7 @@ class SenseVoiceMLX(nn.Module):
     
     def __init__(
         self,
-        input_size: int = 80,
+        input_size: int = 560,  # LFR-processed: 80 mel bins × 7 frames = 560
         vocab_size: int = 25055,
         ignore_id: int = -1,
         blank_id: int = 0,
@@ -479,6 +480,13 @@ class SenseVoiceMLX(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        
+        # Model dimensions - Using LFR-processed 560-dim input
+        self.input_size = input_size  # 560 for LFR-processed features (80 × 7)
+        self.encoder_output_dim = 512  # Encoder internal dimension
+        
+        # The model expects LFR-processed features (560-dim)
+        # No projection needed as embed and encoder are designed for this dimension
         
         # Set default encoder configuration
         if encoder_conf is None:
@@ -496,9 +504,10 @@ class SenseVoiceMLX(nn.Module):
                 "sanm_shift": 0,
             }
         
-        # Initialize encoder
+        # Initialize encoder with CORRECT 80-dim input
+        # First layer's linear_q_k_v will project 80 -> 512*3 internally
         self.encoder = SenseVoiceEncoderSmall(
-            input_size=input_size,
+            input_size=self.input_size,  # 80-dim input as designed
             **encoder_conf
         )
         
@@ -527,9 +536,10 @@ class SenseVoiceMLX(nn.Module):
         self.textnorm_dict = {"withitn": 14, "woitn": 15}
         self.textnorm_int_dict = {25016: 14, 25017: 15}
         
-        # Embedding layer for language and style tokens  
-        embed_dim = 16  # Match PyTorch model: embed.num_embeddings = 16
-        self.embed = nn.Embedding(embed_dim, 560)  # Match PyTorch model: embed.embedding_dim = 560
+        # Embedding layer for language and style tokens
+        # MUST be (16, 80) to concatenate with 80-dim Fbank features
+        embed_count = 16
+        self.embed = nn.Embedding(embed_count, self.input_size)  # (16, 80) - CORRECT dimension
         
         # Emotion dictionary
         self.emo_dict = {"unk": 25009, "happy": 25001, "sad": 25002, "angry": 25003, "neutral": 25004}
@@ -537,53 +547,41 @@ class SenseVoiceMLX(nn.Module):
         print("SenseVoiceMLX model initialized with all components.")
     
     def encode(self, speech: mx.array, speech_lengths: mx.array, text: Optional[mx.array] = None) -> Tuple[mx.array, mx.array]:
-        """Encoder forward pass with language and style conditioning."""
+        """Encoder forward pass with CORRECT 80-dim flow as per model.py design.
+        
+        Correct dimension flow:
+        1. Input speech: (B, T, 80) - Fbank features
+        2. Embed tokens: (B, 4, 80) - SAME dimension as Fbank
+        3. Concatenate: (B, T+4, 80) - all in 80-dim space
+        4. Scale by sqrt(512)
+        5. Apply position encoding (still 80-dim)
+        6. First encoder layer projects 80 -> 512 internally via linear_q_k_v
+        """
         batch_size = speech.shape[0]
         
-        # Create language queries (simplified version)
-        if text is not None:
-            # Extract language IDs from text tokens (first token)
-            lid_tokens = text[:, 0:1]  # Shape: (batch, 1)
-            # Map to language embeddings (simplified mapping)
-            language_query = self.embed(mx.zeros((batch_size, 1), dtype=mx.int32))
-        else:
-            # Default language query
-            language_query = self.embed(mx.zeros((batch_size, 1), dtype=mx.int32))
+        # Create language query (default to auto=0) - outputs 80-dim
+        language_query = self.embed(mx.zeros((batch_size, 1), dtype=mx.int32))
         
-        # Create style queries
-        if text is not None and text.shape[1] > 3:
-            # Extract style tokens (4th token)
-            style_tokens = text[:, 3:4]  # Shape: (batch, 1)
-            style_query = self.embed(mx.ones((batch_size, 1), dtype=mx.int32))
-        else:
-            style_query = self.embed(mx.ones((batch_size, 1), dtype=mx.int32))
+        # Create style/textnorm query (default to woitn=15) - outputs 80-dim
+        style_query = self.embed(mx.full((batch_size, 1), 15, dtype=mx.int32))
         
-        # 首先需要将speech特征从80维投影到560维以匹配embedding输出
-        # 这是PyTorch模型中隐含的步骤
-        batch_size, seq_len, feat_dim = speech.shape
-        if feat_dim != 560:
-            # 创建一个线性投影层将80维转换为560维
-            # 注意：这里使用零填充作为临时解决方案
-            # 实际的PyTorch模型可能有专门的投影层或使用不同的特征提取
-            padding_size = 560 - feat_dim  # 560 - 80 = 480
-            padding = mx.zeros((batch_size, seq_len, padding_size))
-            speech = mx.concatenate([speech, padding], axis=2)
-            print(f"🔧 Speech特征维度扩展: {feat_dim} -> {speech.shape[2]}")
-        
-        # Concatenate style query with speech  
+        # Concatenate style query with speech (both are 80-dim)
         speech = mx.concatenate([style_query, speech], axis=1)
         speech_lengths = speech_lengths + 1
         
-        # Create event and emotion queries
+        # Create event and emotion queries - outputs 80-dim
         event_emo_query = self.embed(mx.array([[1, 2]], dtype=mx.int32))
-        event_emo_query = mx.broadcast_to(event_emo_query, (batch_size, 2, speech.shape[2]))
+        event_emo_query = mx.broadcast_to(event_emo_query, (batch_size, 2, self.input_size))
         
-        # Concatenate language and event/emotion queries
+        # Concatenate all queries with speech (all 80-dim)
         input_query = mx.concatenate([language_query, event_emo_query], axis=1)
         speech = mx.concatenate([input_query, speech], axis=1)
         speech_lengths = speech_lengths + 3
         
-        # Pass through encoder
+        # Scale features (following PyTorch model.py line 554)
+        speech = speech * (self.encoder.output_size() ** 0.5)  # sqrt(512)
+        
+        # Pass through encoder - first layer will project 80 -> 512 internally
         encoder_out, encoder_out_lens = self.encoder(speech, speech_lengths)
         
         return encoder_out, encoder_out_lens

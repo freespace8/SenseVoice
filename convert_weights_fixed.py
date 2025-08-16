@@ -1,213 +1,110 @@
-# convert_weights_fixed.py
-# 修正的PyTorch到MLX权重转换脚本
+# filename: convert_weights_fixed.py
+#
+# A robust, refactored script to convert PyTorch state_dict files 
+# to MLX-compatible .safetensors files without funasr dependency.
 
 import torch
 import numpy as np
 from safetensors.torch import save_file
-import os
 import argparse
-from typing import Dict, Any, Tuple
-from funasr import AutoModel
-
-# 导入模型定义
-from model_mlx import SenseVoiceMLX
-
-print("Fixed Weight Conversion Script Initialized.")
-
-
-def load_pytorch_model(model_path: str = "iic/SenseVoiceSmall"):
-    """加载PyTorch模型并获取权重"""
-    print(f"Loading PyTorch model from '{model_path}'...")
-    
-    pytorch_model = AutoModel(
-        model=model_path,
-        trust_remote_code=True,
-        remote_code="./model.py",
-        vad_model=None,
-        device="cpu",
-    )
-    
-    actual_model = pytorch_model.model
-    actual_model.eval()
-    
-    print(f"PyTorch model loaded successfully.")
-    return actual_model
-
-
-def create_parameter_mapping(pytorch_model, mlx_model):
-    """创建PyTorch到MLX的参数映射"""
-    print("\n" + "="*60)
-    print("CREATING PARAMETER MAPPING")
-    print("="*60)
-    
-    # 获取PyTorch参数
-    pytorch_params = pytorch_model.state_dict()
-    pytorch_param_names = set(pytorch_params.keys())
-    print(f"PyTorch parameters: {len(pytorch_param_names)}")
-    
-    # 获取MLX参数（使用递归方式）
-    def get_mlx_parameters(param_dict, prefix=""):
-        """递归获取MLX模型的所有参数"""
-        params = {}
-        
-        for name, value in param_dict.items():
-            full_name = f"{prefix}.{name}" if prefix else name
-            
-            if isinstance(value, dict):
-                # 这是一个嵌套字典，递归处理
-                sub_params = get_mlx_parameters(value, full_name)
-                params.update(sub_params)
-            elif hasattr(value, 'shape') and hasattr(value, 'dtype'):
-                # 这是一个MLX数组/参数
-                params[full_name] = value
-                
-        return params
-    
-    mlx_params = get_mlx_parameters(mlx_model.parameters())
-    mlx_param_names = set(mlx_params.keys())
-    print(f"MLX parameters: {len(mlx_param_names)}")
-    
-    # 创建映射字典
-    mapping = {}
-    
-    # 直接映射策略
-    for pt_name in pytorch_param_names:
-        # 将PyTorch命名转换为MLX命名
-        mlx_name = convert_pytorch_to_mlx_name(pt_name)
-        
-        if mlx_name in mlx_param_names:
-            # 检查形状是否匹配
-            pt_shape = pytorch_params[pt_name].shape
-            mlx_shape = mlx_params[mlx_name].shape
-            
-            if pt_shape == mlx_shape:
-                mapping[pt_name] = mlx_name
-                print(f"✅ {pt_name} -> {mlx_name} {pt_shape}")
-            else:
-                print(f"❌ Shape mismatch: {pt_name} {pt_shape} vs {mlx_name} {mlx_shape}")
-        else:
-            print(f"❓ No MLX match for: {pt_name}")
-    
-    print(f"\n📊 Mapping Summary:")
-    print(f"   Successfully mapped: {len(mapping)} / {len(pytorch_param_names)}")
-    
-    return mapping, pytorch_params, mlx_params
-
+import re
+from typing import Dict
 
 def convert_pytorch_to_mlx_name(pytorch_name: str) -> str:
-    """将PyTorch参数名转换为MLX参数名"""
-    # 处理编码器层命名的差异：
-    # PyTorch: encoder.encoders0.0.xxx -> MLX: encoder.encoders0_0.xxx
-    # PyTorch: encoder.encoders.5.xxx -> MLX: encoder.encoders_5.xxx
-    # PyTorch: encoder.tp_encoders.10.xxx -> MLX: encoder.tp_encoders_10.xxx
-    
-    mlx_name = pytorch_name
-    
-    # 替换编码器层命名模式
-    import re
-    
-    # 模式: encoders0.数字 -> encoders0_数字
-    mlx_name = re.sub(r'encoders0\.(\d+)', r'encoders0_\1', mlx_name)
-    
-    # 模式: encoders.数字 -> encoders_数字
-    mlx_name = re.sub(r'(?<!encoders0)\.encoders\.(\d+)', lambda m: f".encoders_{m.group(1)}", mlx_name)
-    mlx_name = re.sub(r'^encoders\.(\d+)', r'encoders_\1', mlx_name)
-    
-    # 模式: tp_encoders.数字 -> tp_encoders_数字  
-    mlx_name = re.sub(r'tp_encoders\.(\d+)', r'tp_encoders_\1', mlx_name)
-    
-    # 处理FSMN块的命名差异
-    # PyTorch: fsmn_block -> MLX: fsmn_conv
+    """
+    Converts PyTorch parameter names to the MLX convention used in our model.
+    e.g., 'encoder.encoders.0.norm1.weight' -> 'encoder.encoders_0.norm1.weight'
+    """
+    # This regex handles all encoder layer naming patterns (encoders0, encoders, tp_encoders)
+    # It finds a dot followed by digits followed by another dot, and replaces the dots with underscores.
+    # e.g., .0. -> _0.
+    mlx_name = re.sub(r'\.([0-9]+)\.', r'_\1.', pytorch_name)
+
+    # Handle the FSMN block name difference
     mlx_name = mlx_name.replace('fsmn_block', 'fsmn_conv')
-    
+
     return mlx_name
 
+def convert_and_save(pytorch_weights_path: str, output_path: str):
+    """
+    Loads a PyTorch state_dict, converts it, and saves it as an
+    MLX-compatible safetensors file.
+    """
+    print(f"🚀 Loading PyTorch state_dict from: {pytorch_weights_path}")
 
-def convert_weights(pytorch_model, mlx_model, output_path: str):
-    """执行权重转换"""
-    print(f"\n🚀 Starting weight conversion to '{output_path}'...")
-    
-    # 创建参数映射
-    mapping, pytorch_params, mlx_params = create_parameter_mapping(pytorch_model, mlx_model)
-    
-    if len(mapping) == 0:
-        print("❌ No parameter mappings found! Conversion failed.")
-        return False
-    
-    # 转换权重
-    converted_weights = {}
-    
-    print(f"\n🔄 Converting weights...")
-    for pt_name, mlx_name in mapping.items():
-        try:
-            # 获取PyTorch权重
-            pt_weight = pytorch_params[pt_name]
-            
-            # 转换为numpy，然后保存
-            if pt_weight.dtype == torch.bfloat16:
-                # 转换bfloat16到float32
-                np_weight = pt_weight.to(torch.float32).detach().cpu().numpy()
-            else:
-                np_weight = pt_weight.detach().cpu().numpy()
-            
-            # 处理FSMN权重的形状转换
-            if 'fsmn_conv.weight' in mlx_name and np_weight.shape == (512, 1, 11):
-                # PyTorch: (512, 1, 11) -> MLX: (512, 11, 1)
-                np_weight = np_weight.transpose(0, 2, 1)
-                print(f"   ✨ FSMN shape converted: (512, 1, 11) -> {np_weight.shape}")
-            
-            # 使用MLX名称作为key保存
-            converted_weights[mlx_name] = torch.from_numpy(np_weight)
-            
-        except Exception as e:
-            print(f"❌ Error converting {pt_name}: {e}")
-            return False
-    
-    # 保存转换后的权重
+    # 1. Load the PyTorch state_dict directly from the file.
+    # This is the most direct and reliable way to get the raw weights.
     try:
-        save_file(converted_weights, output_path)
-        print(f"✅ Weights successfully saved to '{output_path}'")
-        print(f"   Converted {len(converted_weights)} parameters")
+        # Use map_location='cpu' to ensure it loads on any machine.
+        state_dict = torch.load(pytorch_weights_path, map_location="cpu")
+        print(f"✅ Successfully loaded {len(state_dict)} tensors from PyTorch file.")
+    except Exception as e:
+        print(f"❌ FATAL: Failed to load PyTorch weights file: {e}")
+        return False
+
+    # 2. Perform a critical diagnostic check on the embed.weight tensor.
+    embed_weight_key = 'embed.weight'
+    if embed_weight_key in state_dict:
+        embed_shape = state_dict[embed_weight_key].shape
+        print(f"🔬 DIAGNOSTIC: Shape of '{embed_weight_key}' is {embed_shape}.")
+        if embed_shape[1] != 80:
+            print(f"🔥🔥🔥 CRITICAL WARNING: The dimension of '{embed_weight_key}' is {embed_shape[1]}, but it MUST be 80.")
+            print("    This strongly indicates you are using a WRONG or CORRUPTED source weights file.")
+            print("    The conversion will proceed, but the resulting file will likely NOT work.")
+    else:
+        print(f"⚠️ WARNING: '{embed_weight_key}' was not found in the state_dict. This may be expected if you are converting a partial model.")
+
+    # 3. Iterate through the PyTorch state_dict and create the new MLX weights dict.
+    mlx_weights: Dict[str, torch.Tensor] = {}
+    print("\n🔄 Converting tensor formats and names...")
+    for pt_name, pt_tensor in state_dict.items():
+        # Convert the parameter name to the MLX convention.
+        mlx_name = convert_pytorch_to_mlx_name(pt_name)
+
+        # Convert to float32 to handle potential issues with bfloat16 or other types.
+        # Keep as torch tensor for safetensors.torch.save_file
+        tensor_float32 = pt_tensor.float().cpu()
+        
+        # Handle FSMN weight transpose: (512, 1, 11) -> (512, 11, 1)
+        if 'fsmn_conv.weight' in mlx_name and tensor_float32.shape == torch.Size([512, 1, 11]):
+            tensor_float32 = tensor_float32.transpose(1, 2)  # Swap dimensions 1 and 2
+            print(f"   ✨ Transposed FSMN weight: {pt_name} from (512, 1, 11) to {tuple(tensor_float32.shape)}")
+
+        mlx_weights[mlx_name] = tensor_float32
+
+    print(f"✅ Conversion logic complete. Total tensors to save: {len(mlx_weights)}")
+
+    # 4. Save the new dictionary as a safetensors file.
+    print(f"\n💾 Saving converted weights to: {output_path}")
+    try:
+        # The save_file function from safetensors.torch expects torch tensors
+        save_file(mlx_weights, output_path)
+        print(f"🎉 Successfully saved MLX weights to '{output_path}'")
         return True
     except Exception as e:
-        print(f"❌ Error saving weights: {e}")
+        print(f"❌ FATAL: Failed to save safetensors file: {e}")
         return False
 
-
 def main():
-    parser = argparse.ArgumentParser(description='Convert PyTorch SenseVoice weights to MLX format')
-    parser.add_argument('--model', default='iic/SenseVoiceSmall', help='PyTorch model path')
-    parser.add_argument('--output', default='sensevoice_mlx_fixed.safetensors', help='Output path for MLX weights')
-    
-    args = parser.parse_args()
-    
-    print("🚀 Starting PyTorch to MLX weight conversion...")
-    print(f"   Model path: {args.model}")
-    print(f"   Output path: {args.output}")
-    
-    try:
-        # 加载模型
-        pytorch_model = load_pytorch_model(args.model)
-        mlx_model = SenseVoiceMLX()
-        
-        # 执行转换
-        success = convert_weights(pytorch_model, mlx_model, args.output)
-        
-        if success:
-            print(f"\n🎉 Conversion completed successfully!")
-            print(f"   Output file: {args.output}")
-        else:
-            print(f"\n❌ Conversion failed!")
-            return 1
-            
-    except Exception as e:
-        print(f"❌ Conversion script failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
-    
-    return 0
+    parser = argparse.ArgumentParser(
+        description='A robust script to convert PyTorch .pt or .bin weight files to MLX-compatible .safetensors.'
+    )
+    parser.add_argument(
+        '--input',
+        type=str,
+        required=True,
+        help='Path to the source PyTorch weights file (e.g., model.pt or pytorch_model.bin)'
+    )
+    parser.add_argument(
+        '--output',
+        type=str,
+        default='sensevoice_mlx_converted.safetensors',
+        help='Output path for the MLX-compatible .safetensors file'
+    )
 
+    args = parser.parse_args()
+
+    convert_and_save(args.input, args.output)
 
 if __name__ == '__main__':
-    exit(main())
+    main()

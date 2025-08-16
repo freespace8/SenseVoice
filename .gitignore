@@ -51,3 +51,37 @@ verification_output_*/
 utils/frontend_mlx.py
 utils/frontend_mlx_v2.py
 utils/fbank_simple.py
+
+# Temporary directories and files
+SenseVoice-main/
+tmp_model_download/
+examples/
+venv/
+benchmark_results*.json
+comparison_*.txt
+comparison_*.json
+transcription_results.txt
+test_results.txt
+
+# Analysis and testing scripts
+analyze_*.py
+fix_*.py
+compare_*.py
+benchmark.py
+
+# Report files
+*_REPORT.md
+*_REPORT.txt
+REMAINING_ISSUES.md
+GEMINI_*.md
+README_MLX_*.md
+TASK_*.md
+
+# Frontend and tokenizer variants
+frontend_mlx*.py
+tokenizer_mlx*.py
+inference_mlx*.py
+engine.py
+
+# NumPy data files
+*.npy
