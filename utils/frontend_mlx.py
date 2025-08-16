@@ -226,7 +226,7 @@ class UnifiedFrontend:
         return self.extract_features(audio, output_format)
 
 
-def create_unified_frontend(
+def create_frontend_mlx(
     cmvn_file: Optional[str] = "/Users/taylor/.cache/modelscope/hub/models/iic/SenseVoiceSmall/am.mvn",
     **kwargs
 ) -> UnifiedFrontend:
