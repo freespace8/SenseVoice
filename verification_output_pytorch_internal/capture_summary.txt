@@ -1,0 +1,20 @@
+Captured Internal Data Summary
+========================================
+Audio file: verification_data/en.mp3
+Model: iic/SenseVoiceSmall
+Device: cpu
+
+encoder_output:
+  Shape: (1, 123, 512)
+  Dtype: float32
+  Min: -20.720844
+  Max: 12.674396
+  Mean: 0.076137
+
+ctc_logits:
+  Shape: (1, 123, 25055)
+  Dtype: float32
+  Min: -34.673737
+  Max: 39.896591
+  Mean: -10.073155
+
