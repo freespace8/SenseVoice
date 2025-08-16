@@ -546,7 +546,7 @@ class SenseVoiceMLX(nn.Module):
         
         print("SenseVoiceMLX model initialized with all components.")
     
-    def encode(self, speech: mx.array, speech_lengths: mx.array, text: Optional[mx.array] = None) -> Tuple[mx.array, mx.array]:
+    def encode(self, speech: mx.array, speech_lengths: mx.array, text: Optional[mx.array] = None, language: str = "auto") -> Tuple[mx.array, mx.array]:
         """Encoder forward pass with CORRECT 80-dim flow as per model.py design.
         
         Correct dimension flow:
@@ -556,11 +556,29 @@ class SenseVoiceMLX(nn.Module):
         4. Scale by sqrt(512)
         5. Apply position encoding (still 80-dim)
         6. First encoder layer projects 80 -> 512 internally via linear_q_k_v
+        
+        Args:
+            speech: Input features of shape (batch, seq_len, 80)
+            speech_lengths: Sequence lengths of shape (batch,)
+            text: Optional text input (not used in this version)
+            language: Language code ("auto", "zh", "en", "yue", "ja", "ko", "nospeech")
         """
         batch_size = speech.shape[0]
         
-        # Create language query (default to auto=0) - outputs 80-dim
-        language_query = self.embed(mx.zeros((batch_size, 1), dtype=mx.int32))
+        # Map language to token ID
+        if language in self.lid_dict:
+            lang_id = self.lid_dict[language]
+        else:
+            # Try to match language prefix (e.g., "en" from "en.mp3")
+            for lang_key in self.lid_dict:
+                if language.startswith(lang_key):
+                    lang_id = self.lid_dict[lang_key]
+                    break
+            else:
+                lang_id = 0  # Default to auto
+        
+        # Create language query with correct language ID - outputs 80-dim
+        language_query = self.embed(mx.full((batch_size, 1), lang_id, dtype=mx.int32))
         
         # Create style/textnorm query (default to woitn=15) - outputs 80-dim
         style_query = self.embed(mx.full((batch_size, 1), 15, dtype=mx.int32))
