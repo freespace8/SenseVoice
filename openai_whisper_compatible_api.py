@@ -41,19 +41,32 @@ async def health():
 
 # Initialize the model - 使用本地缓存路径避免联网下载
 # 本地模型路径
-local_model_path = "/Users/dulei/.cache/modelscope/hub/models/iic/SenseVoiceSmall"
-local_vad_model_path = "/Users/dulei/.cache/modelscope/hub/models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
+local_model_path = "/Users/taylor/.cache/modelscope/hub/models/iic/SenseVoiceSmall"
+local_vad_model_path = "/Users/taylor/.cache/modelscope/hub/models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
 
-# 检查本地模型是否存在，如果不存在则使用原来的方式
-if os.path.exists(local_model_path) and os.path.exists(local_vad_model_path):
-    model = AutoModel(
-        model=local_model_path,
-        vad_model=local_vad_model_path,
-        vad_kwargs={"max_single_segment_time": 30000},
-        trust_remote_code=True,
-        disable_update=True,  # 禁用自动更新检查
-    )
-    print(f"使用本地模型: {local_model_path}")
+# 检查本地模型是否存在
+if os.path.exists(local_model_path):
+    print(f"找到本地主模型: {local_model_path}")
+    if os.path.exists(local_vad_model_path):
+        print(f"找到本地VAD模型: {local_vad_model_path}")
+        model = AutoModel(
+            model=local_model_path,
+            vad_model=local_vad_model_path,
+            vad_kwargs={"max_single_segment_time": 30000},
+            trust_remote_code=True,
+            disable_update=True,  # 禁用自动更新检查
+        )
+        print("使用本地模型和VAD模型")
+    else:
+        print("VAD模型不存在，使用在线VAD模型")
+        model = AutoModel(
+            model=local_model_path,
+            vad_model="iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+            vad_kwargs={"max_single_segment_time": 30000},
+            trust_remote_code=True,
+            disable_update=True,  # 禁用自动更新检查
+        )
+        print("使用本地主模型 + 在线VAD模型")
 else:
     # 如果本地模型不存在，回退到在线下载
     model = AutoModel(
