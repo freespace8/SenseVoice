@@ -458,28 +458,51 @@ class SenseVoiceMLX(nn.Module):
         
         return encoder_out, encoder_out_lens
     
-    def __call__(self, speech: mx.array, speech_lengths: Optional[mx.array] = None, **kwargs) -> Dict[str, mx.array]:
+    def __call__(self, speech: mx.array, speech_lengths: Optional[mx.array] = None, debug: bool = False, **kwargs) -> Dict[str, mx.array]:
         """
         Forward pass for inference.
+        Includes a debug mode to return intermediate layer outputs for verification.
         
         Args:
             speech: Input features of shape (batch, seq_len, feature_dim)
             speech_lengths: Sequence lengths of shape (batch,)
+            debug: If True, returns intermediate outputs for verification
             
         Returns:
             Dictionary containing model outputs with 'ctc_logits' key
+            If debug=True, returns dictionary with intermediate outputs
         """
+        # 如果是调试模式，则初始化一个用于存储中间输出的字典
+        debug_outputs = {}
+        
         if speech_lengths is None:
             batch_size, seq_len, _ = speech.shape
             speech_lengths = mx.full((batch_size,), seq_len, dtype=mx.int32)
         
+        # 捕获原始输入特征
+        if debug:
+            debug_outputs["input_speech"] = speech
+            debug_outputs["input_speech_lengths"] = speech_lengths
+        
         # Encode speech
         encoder_out, encoder_out_lens = self.encode(speech, speech_lengths)
+        
+        # 捕获编码器输出
+        if debug:
+            debug_outputs["encoder_out"] = encoder_out
+            debug_outputs["encoder_out_lens"] = encoder_out_lens
         
         # Get CTC logits
         ctc_logits = self.ctc.get_logits(encoder_out)
         
-        return {'ctc_logits': ctc_logits}
+        # 最终的返回逻辑
+        if debug:
+            # 在调试模式下，将最终输出也加入字典并返回整个字典
+            debug_outputs["ctc_logits"] = ctc_logits
+            return debug_outputs
+        else:
+            # 在正常模式下，保持与原始PyTorch模型相同的输出格式
+            return {'ctc_logits': ctc_logits}
     
     def load_pytorch_weights(self, pytorch_state_dict: dict, strict: bool = True) -> None:
         """
