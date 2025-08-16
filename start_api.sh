@@ -69,25 +69,71 @@ detect_venv() {
     PYTHON_CMD="python3"
 }
 
-# 检查进程是否运行
+# 检查进程是否运行（增强版：处理PID文件丢失的情况）
 is_running() {
+    local running_pid=""
+    
+    # 方法1：检查PID文件
     if [ -f "$PID_FILE" ]; then
         local pid=$(cat "$PID_FILE")
         if ps -p $pid > /dev/null 2>&1; then
-            return 0  # 进程在运行
+            # 验证这个PID确实是我们的API脚本
+            if ps -p $pid -o command= | grep -q "$API_SCRIPT"; then
+                return 0  # 进程在运行且是正确的脚本
+            else
+                # PID被其他进程复用，删除无效的PID文件
+                rm -f "$PID_FILE"
+            fi
         else
             # PID文件存在但进程不在运行，删除无效的PID文件
             rm -f "$PID_FILE"
-            return 1  # 进程不在运行
         fi
     fi
-    return 1  # PID文件不存在
+    
+    # 方法2：如果PID文件不存在或无效，通过进程名查找
+    running_pid=$(pgrep -f "$API_SCRIPT" | head -1)
+    if [ -n "$running_pid" ]; then
+        # 找到了运行的进程，重建PID文件
+        echo "$running_pid" > "$PID_FILE"
+        print_warning "检测到API服务正在运行但PID文件丢失，已重建PID文件 (PID: $running_pid)"
+        return 0  # 进程在运行
+    fi
+    
+    # 方法3：检查端口占用（作为最后的验证）
+    local port_pid=$(lsof -ti:$PORT 2>/dev/null)
+    if [ -n "$port_pid" ]; then
+        # 验证占用端口的进程是否是我们的API脚本
+        if ps -p $port_pid -o command= | grep -q "$API_SCRIPT"; then
+            echo "$port_pid" > "$PID_FILE"
+            print_warning "检测到API服务正在运行但PID文件丢失，已重建PID文件 (PID: $port_pid)"
+            return 0  # 进程在运行
+        fi
+    fi
+    
+    return 1  # 确认进程不在运行
 }
 
-# 获取进程PID
+# 获取进程PID（增强版：自动恢复丢失的PID文件）
 get_pid() {
+    # 首先检查PID文件是否存在且有效
     if [ -f "$PID_FILE" ]; then
-        cat "$PID_FILE"
+        local pid=$(cat "$PID_FILE")
+        # 验证PID对应的进程是否存在且是正确的脚本
+        if ps -p $pid > /dev/null 2>&1 && ps -p $pid -o command= | grep -q "$API_SCRIPT"; then
+            echo "$pid"
+            return
+        else
+            # PID文件无效，删除它
+            rm -f "$PID_FILE"
+        fi
+    fi
+    
+    # 如果PID文件不存在或无效，尝试通过进程名查找
+    local running_pid=$(pgrep -f "$API_SCRIPT" | head -1)
+    if [ -n "$running_pid" ]; then
+        # 重建PID文件
+        echo "$running_pid" > "$PID_FILE"
+        echo "$running_pid"
     else
         echo ""
     fi
