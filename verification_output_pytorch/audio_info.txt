@@ -1,0 +1,7 @@
+Audio file: verification_data/en.mp3
+File size: 57441 bytes
+Model configuration: iic/SenseVoiceSmall
+Device: cpu
+Language detection: auto
+ITN disabled: True
+VAD disabled: True
