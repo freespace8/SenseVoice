@@ -174,8 +174,7 @@ start_api() {
         return 1
     fi
     
-    # 后台启动服务
-    detect_venv
+    # 后台启动服务（check_dependencies 已经设置了 PYTHON_CMD）
     nohup $PYTHON_CMD -u "$API_SCRIPT" > "$LOG_FILE" 2>&1 &
     local pid=$!
     echo $pid > "$PID_FILE"
@@ -304,8 +303,7 @@ run_foreground() {
     echo -e "  日志级别: ${LOG_LEVEL}"
     echo -e "${CYAN}========================================${NC}"
     
-    # 前台运行
-    detect_venv
+    # 前台运行（check_dependencies 已经设置了 PYTHON_CMD）
     $PYTHON_CMD "$API_SCRIPT"
 }
 
@@ -318,7 +316,11 @@ test_api() {
     fi
     
     print_info "运行 API 测试..."
-    detect_venv
+    
+    # 确保 PYTHON_CMD 已设置
+    if [ -z "$PYTHON_CMD" ]; then
+        detect_venv
+    fi
     
     if [ -f "test_mlx_api.py" ]; then
         $PYTHON_CMD test_mlx_api.py "http://${HOST}:${PORT}"
