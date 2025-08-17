@@ -28,6 +28,8 @@ modelscope_models
 examples/aishell/llm_asr_nar/*
 api.log
 api.pid
+api_mlx.log
+api_mlx.pid
 model/model_mlx.safetensors
 model_comparison_results.txt
 tmp_mlx/
