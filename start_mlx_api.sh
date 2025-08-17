@@ -62,6 +62,7 @@ show_help() {
     echo "  SENSEVOICE_MLX_HOST    - 监听地址 (默认: 127.0.0.1)"
     echo "  SENSEVOICE_MLX_PORT    - 监听端口 (默认: 6209)"
     echo "  SENSEVOICE_MLX_LOG_LEVEL - 日志级别 (默认: INFO)"
+    echo "  SENSEVOICE_ENABLE_PUNCTUATION - 启用标点恢复 (默认: true)"
     echo ""
     echo -e "${CYAN}========================================${NC}"
 }

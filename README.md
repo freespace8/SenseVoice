@@ -7,6 +7,7 @@
 - **极速推理**: 比 PyTorch 版本快 12-15 倍
 - **内存高效**: 充分利用 Apple Silicon 统一内存架构
 - **完整兼容**: 支持所有 SenseVoice 功能（ASR、情感识别、事件检测）
+- **标点恢复**: 自动为识别结果添加标点符号（中文优化）
 - **简单易用**: 提供简洁的 Python API 接口
 
 #### 快速开始 MLX
@@ -25,12 +26,15 @@ python convert_mlx_weights.py
 ```python
 from voice_mlx import VoiceMLX
 
-# 初始化模型
-voice = VoiceMLX()
+# 初始化模型（支持标点恢复）
+voice = VoiceMLX(enable_punctuation=True)
 
-# 转录音频
+# 转录音频（自动添加标点）
 result = voice.transcribe("audio.mp3")
-print(result['text'])
+print(result['text'])  # 输出带标点的文本
+
+# 动态控制标点恢复
+result = voice.transcribe("audio.mp3", enable_punctuation=False)
 ```
 
 4. **启动 MLX API 服务器**
@@ -46,7 +50,8 @@ print(result['text'])
 ```
 
 #### MLX API 端点
-- `POST /v1/audio/transcriptions` - 转录音频（OpenAI 兼容）
+- `POST /v1/audio/transcriptions` - 转录音频（OpenAI 兼容，支持标点恢复）
+  - 参数 `enable_punctuation`: 控制是否启用标点恢复（默认启用）
 - `GET /health` - 健康检查
 - `GET /stats` - 统计信息
 - `POST /v1/benchmark` - 性能测试

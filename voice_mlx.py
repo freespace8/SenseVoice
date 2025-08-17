@@ -18,6 +18,7 @@ import mlx.core as mx
 # 导入模型和前端处理
 from model_mlx import SenseVoiceMLX
 from utils.frontend_mlx import create_frontend_mlx
+from utils.postprocess import PunctuationRestorer
 
 
 class VoiceMLX:
@@ -36,7 +37,8 @@ class VoiceMLX:
         model_path: str = "/Users/taylor/Documents/code/SenseVoice/model/model_mlx.safetensors",
         model_dir: str = "/Users/taylor/.cache/modelscope/hub/models/iic/SenseVoiceSmall",
         device: str = "auto",
-        verbose: bool = True
+        verbose: bool = True,
+        enable_punctuation: bool = False
     ):
         """初始化 VoiceMLX
         
@@ -45,11 +47,13 @@ class VoiceMLX:
             model_dir: 模型目录，包含 tokenizer 和配置文件
             device: 设备类型（auto/cpu/gpu）
             verbose: 是否输出详细信息
+            enable_punctuation: 是否在初始化时加载并启用标点恢复模型
         """
         self.model_path = model_path
         self.model_dir = model_dir
         self.device = device
         self.verbose = verbose
+        self.enable_punctuation = enable_punctuation
         
         # 初始化组件
         self.model = None
@@ -101,6 +105,17 @@ class VoiceMLX:
         
         # 加载 tokenizer
         self._load_tokenizer()
+        
+        # 初始化标点恢复器 (如果用户选择启用)
+        self.punctuator = None  # 关键：为属性设置一个默认的 None 值
+        
+        if self.enable_punctuation:
+            # 仅在标志为 True 时，才实例化 PunctuationRestorer
+            # 这将触发标点模型的加载过程
+            self.punctuator = PunctuationRestorer(
+                device="cpu",  # MLX 环境下使用 CPU 处理标点恢复
+                verbose=self.verbose  # 保持日志输出行为一致
+            )
         
         if self.verbose:
             print("✅ VoiceMLX 初始化完成")
@@ -184,7 +199,8 @@ class VoiceMLX:
         language: str = "auto",
         return_tokens: bool = False,
         keep_special_tokens: bool = False,
-        sample_rate: int = 16000
+        sample_rate: int = 16000,
+        enable_punctuation: Optional[bool] = None
     ) -> Dict:
         """转录音频
         
@@ -194,6 +210,10 @@ class VoiceMLX:
             return_tokens: 是否返回 token IDs
             keep_special_tokens: 是否保留特殊标记
             sample_rate: 采样率
+            enable_punctuation: 控制此次调用的标点恢复行为。
+                - True: 强制启用标点恢复。
+                - False: 强制禁用标点恢复。
+                - None (默认): 继承初始化时设置的 self.enable_punctuation 状态。
             
         Returns:
             包含识别结果的字典：
@@ -222,6 +242,16 @@ class VoiceMLX:
         start_time = time.time()
         text, tokens = self._inference(features, language, keep_special_tokens)
         inference_time = time.time() - start_time
+        
+        # 决定是否应用标点恢复 (优先级: 方法 > 实例)
+        use_punctuation = self.enable_punctuation
+        if enable_punctuation is not None:
+            use_punctuation = enable_punctuation
+        
+        # 如果决策为 True，并且标点恢复器已成功加载，则执行后处理
+        if use_punctuation and self.punctuator:
+            # 核心：用带标点的文本覆盖原始文本
+            text = self.punctuator.restore(text)
         
         # 构建返回结果
         result = {
@@ -424,50 +454,74 @@ class SimpleTokenizer:
 
 
 def main():
-    """示例用法"""
-    # 创建 VoiceMLX 实例
-    voice = VoiceMLX(verbose=True)
-    
-    # 示例音频文件
+    """
+    一个用于验证标点恢复功能的集成测试桩。
+    该函数将按顺序执行所有关键测试场景。
+    """
+    print("=" * 80)
+    print("🚀 开始执行 VoiceMLX 集成测试...")
+    print("=" * 80)
+
+    # 准备测试音频文件
     examples_dir = "/Users/taylor/Documents/code/SenseVoice/examples"
-    
-    if os.path.exists(examples_dir):
-        audio_files = [
-            os.path.join(examples_dir, f)
-            for f in os.listdir(examples_dir)
-            if f.endswith('.mp3')
-        ]
-        
-        if audio_files:
-            print("\n" + "=" * 60)
-            print("📝 转录示例")
-            print("=" * 60)
-            
-            for audio_file in audio_files[:2]:  # 只测试前两个文件
-                print(f"\n🎵 音频文件: {os.path.basename(audio_file)}")
-                
-                # 转录
-                result = voice.transcribe(
-                    audio_file,
-                    language="auto",
-                    keep_special_tokens=True
-                )
-                
-                print(f"📝 识别结果: {result['text']}")
-                print(f"⏱️  推理时间: {result['time']:.3f}秒")
-                print(f"🌐 检测语言: {result['language']}")
-            
-            # 性能基准测试
-            if audio_files:
-                print("\n" + "=" * 60)
-                print("⚡ 性能基准测试")
-                print("=" * 60)
-                
-                benchmark = voice.benchmark(audio_files[0], iterations=5)
-                print(f"平均时间: {benchmark['mean_time']:.3f}秒")
-                print(f"标准差: {benchmark['std_time']:.3f}秒")
-                print(f"最快: {benchmark['min_time']:.3f}秒")
-                print(f"最慢: {benchmark['max_time']:.3f}秒")
+    audio_file = os.path.join(examples_dir, "zh.mp3")  # 使用中文音频测试标点恢复
+
+    if not os.path.exists(audio_file):
+        print(f"❌ 测试失败: 音频文件不存在于 {audio_file}")
+        return
+
+    print(f"🎵 使用测试文件: {os.path.basename(audio_file)}\n")
+
+    # --- 测试场景 A: 默认行为 (向后兼容性) ---
+    print("--- [测试场景 A]: 默认行为 (标点禁用) ---")
+    try:
+        # 使用 verbose=False 保持输出干净
+        voice_default = VoiceMLX(verbose=False)
+        result_A = voice_default.transcribe(audio_file, keep_special_tokens=False)
+        print(f"  [预期 (无标点)]: {result_A['text']}\n")
+    except Exception as e:
+        print(f"  ❌ 测试场景 A 失败: {e}\n")
+
+
+    # --- 测试场景 B: 初始化时启用标点 ---
+    print("--- [测试场景 B]: 初始化时启用标点 ---")
+    try:
+        voice_punc_on = VoiceMLX(enable_punctuation=True, verbose=False)
+        result_B = voice_punc_on.transcribe(audio_file, keep_special_tokens=False)
+        print(f"  [预期 (有标点)]: {result_B['text']}\n")
+    except Exception as e:
+        print(f"  ❌ 测试场景 B 失败: {e}\n")
+
+
+    # --- 测试场景 C: 动态覆盖方法调用 ---
+    print("--- [测试场景 C]: 动态覆盖方法调用 ---")
+    # C.1: 在默认实例上，单次调用时强制启用标点
+    print("  --- [C.1]: 在默认实例上单次启用 ---")
+    try:
+        result_C1 = voice_default.transcribe(
+            audio_file,
+            enable_punctuation=True,
+            keep_special_tokens=False
+        )
+        print(f"    [预期 (有标点)]: {result_C1['text']}\n")
+    except Exception as e:
+        print(f"    ❌ 测试场景 C.1 失败: {e}\n")
+
+    # C.2: 在标点实例上，单次调用时强制禁用标点
+    print("  --- [C.2]: 在标点实例上单次禁用 ---")
+    try:
+        result_C2 = voice_punc_on.transcribe(
+            audio_file,
+            enable_punctuation=False,
+            keep_special_tokens=False
+        )
+        print(f"    [预期 (无标点)]: {result_C2['text']}\n")
+    except Exception as e:
+        print(f"    ❌ 测试场景 C.2 失败: {e}\n")
+
+    print("=" * 80)
+    print("✅ 测试执行完毕。请检查以上输出是否符合预期。")
+    print("=" * 80)
 
 
 if __name__ == "__main__":

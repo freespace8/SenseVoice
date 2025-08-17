@@ -118,11 +118,20 @@ def initialize_model():
         print("⏳ 正在初始化 MLX 模型...")
         start_time = time.time()
         
+        # 从环境变量读取是否启用标点恢复（默认启用）
+        enable_punctuation = os.getenv("SENSEVOICE_ENABLE_PUNCTUATION", "true").lower() == "true"
+        
         model = VoiceMLX(
             model_path=config.MODEL_PATH,
             model_dir=config.MODEL_DIR,
-            verbose=True
+            verbose=True,
+            enable_punctuation=enable_punctuation
         )
+        
+        if enable_punctuation:
+            logger.info("✅ 标点恢复功能已启用")
+        else:
+            logger.info("ℹ️ 标点恢复功能未启用（设置 SENSEVOICE_ENABLE_PUNCTUATION=true 以启用）")
         
         load_time = time.time() - start_time
         print(f"✅ MLX 模型初始化成功 (耗时: {load_time:.2f}秒)")
@@ -232,8 +241,14 @@ def format_text(text: str, response_format: str = "json") -> str:
     return text
 
 
-def process_audio_file(file_path: str, language: str = "auto") -> Dict[str, Any]:
-    """处理音频文件"""
+def process_audio_file(file_path: str, language: str = "auto", enable_punctuation: Optional[bool] = None) -> Dict[str, Any]:
+    """处理音频文件
+    
+    Args:
+        file_path: 音频文件路径
+        language: 语言设置
+        enable_punctuation: 是否启用标点恢复（None 时使用模型默认设置）
+    """
     if model is None:
         raise HTTPException(
             status_code=503,
@@ -245,13 +260,20 @@ def process_audio_file(file_path: str, language: str = "auto") -> Dict[str, Any]
         audio, sr = librosa.load(file_path, sr=config.TARGET_SAMPLE_RATE, mono=True)
         duration = len(audio) / sr
         
+        # 构建转录参数
+        transcribe_kwargs = {
+            "audio": audio,
+            "language": language,
+            "return_tokens": False,
+            "keep_special_tokens": False  # 不保留特殊标记
+        }
+        
+        # 如果指定了标点恢复设置，添加到参数中
+        if enable_punctuation is not None:
+            transcribe_kwargs["enable_punctuation"] = enable_punctuation
+        
         # 转录
-        result = model.transcribe(
-            audio,
-            language=language,
-            return_tokens=False,
-            keep_special_tokens=False  # 不保留特殊标记
-        )
+        result = model.transcribe(**transcribe_kwargs)
         
         # 构建响应
         response = {
@@ -281,7 +303,8 @@ async def transcribe_audio(
     prompt: Optional[str] = Form(default=None),
     response_format: str = Form(default="json"),
     temperature: float = Form(default=0.0),
-    timestamp_granularities: Optional[List[str]] = Form(default=None)
+    timestamp_granularities: Optional[List[str]] = Form(default=None),
+    enable_punctuation: Optional[bool] = Form(default=None)
 ):
     """
     转录音频文件（OpenAI Whisper API 兼容）
@@ -294,6 +317,7 @@ async def transcribe_audio(
         response_format: 响应格式 (json/text/srt/verbose_json/vtt)
         temperature: 温度参数（暂不支持）
         timestamp_granularities: 时间戳粒度（暂不支持）
+        enable_punctuation: 是否启用标点恢复（None 时使用默认设置）
     """
     
     # 检查文件大小
@@ -326,7 +350,8 @@ async def transcribe_audio(
         # 处理音频
         result = process_audio_file(
             temp_file,
-            language=language or "auto"
+            language=language or "auto",
+            enable_punctuation=enable_punctuation
         )
         
         # 格式化响应
