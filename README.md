@@ -1,15 +1,6 @@
-# 🚀 来自雷哥的补充
-
 ## ✨ 新增功能
 
-### 1. OpenAI Whisper 兼容 API
-我增加了一个 **Python API 文件**: `openai_whisper_compatible_api.py`
-
-🎯 **用途**: 可以用于 Spokenly 的 API 调用，完全兼容 OpenAI Whisper API
-
-💡 **体验**: 非常好用！
-
-### 2. 🍎 MLX 支持 (Apple Silicon 加速)
+### 1. 🍎 MLX 支持 (Apple Silicon 加速)
 为 Mac 用户带来了极速体验！在 Apple Silicon (M1/M2/M3) 设备上实现 **5-15倍** 的推理加速。
 
 #### MLX 功能特性
@@ -81,15 +72,6 @@ transcript = client.audio.transcriptions.create(
 )
 print(transcript.text)
 ```
-
----
-
-## 🌐 关注我
-
-**我的网站**: [leigeai.com](https://leigeai.com)
-
----
-
 
 ([简体中文](./README_zh.md)|English|[日本語](./README_ja.md))
 
