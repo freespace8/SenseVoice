@@ -9,8 +9,8 @@ PID_FILE="api_mlx.pid"
 LOG_FILE="api_mlx.log"
 
 # 默认配置
-HOST="${SENSEVOICE_MLX_HOST:-0.0.0.0}"
-PORT="${SENSEVOICE_MLX_PORT:-8001}"
+HOST="${SENSEVOICE_MLX_HOST:-127.0.0.1}"
+PORT="${SENSEVOICE_MLX_PORT:-6209}"
 LOG_LEVEL="${SENSEVOICE_MLX_LOG_LEVEL:-INFO}"
 
 # 设置颜色输出
@@ -59,8 +59,8 @@ show_help() {
     echo "  help        - 显示此帮助信息"
     echo ""
     echo "环境变量："
-    echo "  SENSEVOICE_MLX_HOST    - 监听地址 (默认: 0.0.0.0)"
-    echo "  SENSEVOICE_MLX_PORT    - 监听端口 (默认: 8001)"
+    echo "  SENSEVOICE_MLX_HOST    - 监听地址 (默认: 127.0.0.1)"
+    echo "  SENSEVOICE_MLX_PORT    - 监听端口 (默认: 6209)"
     echo "  SENSEVOICE_MLX_LOG_LEVEL - 日志级别 (默认: INFO)"
     echo ""
     echo -e "${CYAN}========================================${NC}"

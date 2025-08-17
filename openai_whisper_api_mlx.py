@@ -31,7 +31,7 @@ class Config:
     def __init__(self):
         # 服务器配置
         self.HOST = os.getenv("SENSEVOICE_MLX_HOST", "0.0.0.0")
-        self.PORT = int(os.getenv("SENSEVOICE_MLX_PORT", "8001"))
+        self.PORT = int(os.getenv("SENSEVOICE_MLX_PORT", "6209"))
         
         # 模型配置
         self.MODEL_PATH = os.getenv(
