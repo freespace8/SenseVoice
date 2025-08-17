@@ -9,3 +9,12 @@ gradio
 fastapi>=0.111.1
 psutil>=5.9.0
 uvicorn[standard]>=0.23.0
+# MLX-specific dependencies for SenseVoice
+mlx>=0.20.0
+mlx-lm>=0.20.0
+soundfile>=0.12.0
+# Additional dependencies for conversion and runtime
+safetensors>=0.4.3
+packaging>=20.9
+tabulate>=0.9.0
+rich>=13.0.0
