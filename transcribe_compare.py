@@ -8,24 +8,17 @@ import os
 import sys
 import time
 import torch
-import numpy as np
-import librosa
 from pathlib import Path
 from rich.console import Console
 from rich.table import Table
-from rich.align import Align
 
 # 设置 CUDA 设备为 CPU (Mac 环境)
 os.environ['CUDA_VISIBLE_DEVICES'] = ''
 torch.set_default_tensor_type('torch.FloatTensor')
 
-# 导入 MLX 相关
-import mlx.core as mx
-
 # 导入模型
 from model import SenseVoiceSmall
-from model_mlx import SenseVoiceMLX
-from utils.frontend_mlx import create_frontend_mlx
+from voice_mlx import VoiceMLX  # 使用新的封装类
 
 # 导入 FunASR
 from funasr import AutoModel
@@ -55,33 +48,16 @@ def load_pytorch_model(model_dir="/Users/taylor/.cache/modelscope/hub/models/iic
 
 
 def load_mlx_model(model_path="/Users/taylor/Documents/code/SenseVoice/model/model_mlx.safetensors"):
-    """加载 MLX 模型"""
+    """加载 MLX 模型 (使用 VoiceMLX 封装)"""
     print("\n📦 加载 MLX 模型...")
     start_time = time.time()
     
     try:
-        # 初始化模型
-        model = SenseVoiceMLX(
-            input_size=560,  # LFR 特征维度
-            vocab_size=25055,
-            encoder_conf={
-                "output_size": 512,
-                "attention_heads": 4,
-                "linear_units": 2048,
-                "num_blocks": 50,
-                "tp_blocks": 20,
-                "dropout_rate": 0.1,
-                "positional_dropout_rate": 0.1,
-                "attention_dropout_rate": 0.0,
-                "normalize_before": True,
-                "kernel_size": 11,
-                "sanm_shift": 0,
-            }
+        # 使用 VoiceMLX 封装类
+        model = VoiceMLX(
+            model_path=model_path,
+            verbose=False  # 避免重复输出
         )
-        
-        # 加载权重
-        weights = mx.load(model_path)
-        model.load_weights(weights)
         
         load_time = time.time() - start_time
         print(f"   ✅ MLX 模型加载成功 (耗时: {load_time:.2f}秒)")
@@ -91,33 +67,6 @@ def load_mlx_model(model_path="/Users/taylor/Documents/code/SenseVoice/model/mod
         return None
 
 
-def extract_features_for_pytorch(audio_path, frontend):
-    """为 PyTorch 模型提取特征"""
-    # 读取音频
-    waveform, sr = librosa.load(audio_path, sr=16000, mono=True)
-    
-    # 使用统一前端提取特征
-    features = frontend(waveform, output_format="numpy")
-    
-    # 转换为 PyTorch 张量
-    features_pt = torch.from_numpy(features).float()
-    
-    # 添加 batch 维度
-    if len(features_pt.shape) == 2:
-        features_pt = features_pt.unsqueeze(0)
-    
-    return features_pt, features_pt.shape[1]
-
-
-def extract_features_for_mlx(audio_path, frontend):
-    """为 MLX 模型提取特征"""
-    # 读取音频
-    waveform, sr = librosa.load(audio_path, sr=16000, mono=True)
-    
-    # 使用统一前端提取特征，直接返回 MLX 格式
-    features_mx = frontend(waveform, output_format="mlx")
-    
-    return features_mx, features_mx.shape[1]
 
 
 def inference_pytorch(model, kwargs, audio_path, language="auto"):
@@ -154,105 +103,34 @@ def inference_pytorch(model, kwargs, audio_path, language="auto"):
         return f"[错误: {str(e)}]", 0
 
 
-def load_tokenizer():
-    """加载 tokenizer 用于解码"""
-    try:
-        # 首先尝试加载 sentencepiece tokenizer
-        from funasr.tokenizer.sentencepiece_tokenizer import SentencepiecesTokenizer
-        model_dir = "/Users/taylor/.cache/modelscope/hub/models/iic/SenseVoiceSmall"
-        tokenizer_conf = {"sentencepiece_model": f"{model_dir}/chn_jpn_yue_eng_ko_spectok.bpe.model"}
-        tokenizer = SentencepiecesTokenizer(**tokenizer_conf)
-        return tokenizer
-    except:
-        # 如果失败，尝试使用 tokens.json
-        try:
-            import json
-            tokens_file = "/Users/taylor/.cache/modelscope/hub/models/iic/SenseVoiceSmall/tokens.json"
-            with open(tokens_file, 'r', encoding='utf-8') as f:
-                tokens = json.load(f)
-            
-            # 创建一个简单的 tokenizer 对象
-            class SimpleTokenizer:
-                def __init__(self, tokens):
-                    self.tokens = tokens
-                    self.id2token = {i: token for i, token in enumerate(tokens)}
-                
-                def decode(self, token_ids, keep_special_tokens=False):
-                    """将 token IDs 解码为文本
-                    
-                    Args:
-                        token_ids: Token ID 列表
-                        keep_special_tokens: 是否保留特殊标记
-                    """
-                    text_tokens = []
-                    for tid in token_ids:
-                        if tid in self.id2token:
-                            token = self.id2token[tid]
-                            # 根据设置决定是否跳过特殊标记
-                            if keep_special_tokens or not (token.startswith('<') and token.endswith('>')):
-                                text_tokens.append(token)
-                    
-                    # 合并文本
-                    text = ''.join(text_tokens)
-                    # 清理文本
-                    text = text.replace('▁', ' ')  # 替换空格标记
-                    text = text.strip()
-                    return text
-            
-            return SimpleTokenizer(tokens)
-        except:
-            return None
-
-
-def inference_mlx(model, frontend, audio_path, language="auto", tokenizer=None, keep_special_tokens=False):
-    """使用 MLX 模型进行推理
+def inference_mlx(model, audio_path, language="auto", keep_special_tokens=False):
+    """使用 MLX 模型进行推理 (使用 VoiceMLX 封装)
     
     Args:
-        model: MLX 模型
-        frontend: 前端处理器
+        model: VoiceMLX 实例
         audio_path: 音频文件路径
         language: 语言设置
-        tokenizer: 分词器
         keep_special_tokens: 是否保留特殊标记（如语言、情感标记）
     """
     print(f"\n⚡ MLX 推理: {audio_path}")
     
     try:
-        # 提取特征
-        features_mx = extract_features_for_mlx(audio_path, frontend)
-        speech_lengths = mx.array([features_mx[0].shape[1]], dtype=mx.int32)
-        
-        # 推理
+        # 使用 VoiceMLX 的 transcribe 方法
         start_time = time.time()
-        outputs = model(features_mx[0], speech_lengths)
-        ctc_logits = outputs['ctc_logits']
-        
-        # CTC 解码
-        token_ids = mx.argmax(ctc_logits[0], axis=-1)
-        
-        # 去除重复
-        token_ids_np = np.array(token_ids)
-        decoded_tokens = []
-        prev_token = -1
-        for token in token_ids_np:
-            if token != prev_token and token != 0:  # 0 是 blank token
-                decoded_tokens.append(token)
-            prev_token = token
-        
+        result = model.transcribe(
+            audio_path,
+            language=language,
+            return_tokens=True,
+            keep_special_tokens=keep_special_tokens
+        )
         inference_time = time.time() - start_time
         
-        # 使用 tokenizer 解码文本
-        if tokenizer and len(decoded_tokens) > 0:
-            try:
-                text = tokenizer.decode(decoded_tokens, keep_special_tokens=keep_special_tokens)
-            except:
-                text = f"[Tokens: {decoded_tokens[:20]}...]" if len(decoded_tokens) > 20 else f"[Tokens: {decoded_tokens}]"
-        else:
-            text = f"[Tokens: {decoded_tokens[:20]}...]" if len(decoded_tokens) > 20 else f"[Tokens: {decoded_tokens}]"
+        text = result['text']
+        tokens = result.get('tokens', [])
         
         print(f"   ⏱️  推理时间: {inference_time:.3f}秒")
         print(f"   📝 识别结果: {text}")
-        return text, inference_time, decoded_tokens
+        return text, inference_time, tokens
         
     except Exception as e:
         print(f"   ❌ 推理失败: {e}")
@@ -300,18 +178,6 @@ def compare_models(audio_files):
         print("❌ 模型加载失败，无法进行对比")
         return
     
-    # 创建统一前端
-    print("\n📐 初始化统一前端...")
-    cmvn_file = "/Users/taylor/.cache/modelscope/hub/models/iic/SenseVoiceSmall/am.mvn"
-    frontend = create_frontend_mlx(cmvn_file=cmvn_file if os.path.exists(cmvn_file) else None)
-    
-    # 加载 tokenizer
-    print("📖 加载 Tokenizer...")
-    tokenizer = load_tokenizer()
-    if tokenizer:
-        print("   ✅ Tokenizer 加载成功")
-    else:
-        print("   ⚠️  Tokenizer 加载失败，MLX 将只输出 Token IDs")
     
     # 对比结果
     results = []
@@ -344,7 +210,7 @@ def compare_models(audio_files):
         
         # MLX 推理（保留特殊标记以匹配 PyTorch 输出格式）
         mlx_text, mlx_time, mlx_tokens = inference_mlx(
-            mlx_model, frontend, audio_file, language, tokenizer, keep_special_tokens=True
+            mlx_model, audio_file, language, keep_special_tokens=True
         )
         
         # 计算加速比
