@@ -30,3 +30,4 @@ api.log
 api.pid
 model/model_mlx.safetensors
 model_comparison_results.txt
+tmp_mlx/
