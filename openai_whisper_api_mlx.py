@@ -130,11 +130,11 @@ corrector_model: Optional[MacBertCorrector] = None
 def get_corrector() -> MacBertCorrector:
     """
     获取 MacBertCorrector 模型实例（懒加载）。
-    模型在首次调用时初始化并缓存。
+    为了性能优化，移除懒加载机制，在应用启动时统一初始化。
     """
     global corrector_model
     if corrector_model is None:
-        config.logger.info("🔧 正在首次初始化 MacBertCorrector 文本纠错模型...")
+        config.logger.info("🔧 正在初始化 MacBertCorrector 文本纠错模型...")
         config.logger.info("📦 模型来源: shibing624/macbert4csc-base-chinese")
         start_time = time.time()
         # 注意：MacBertCorrector 默认会从 huggingface 下载模型，
@@ -146,8 +146,8 @@ def get_corrector() -> MacBertCorrector:
     return corrector_model
 
 
-def initialize_model():
-    """初始化 MLX 模型"""
+def initialize_models():
+    """初始化所有模型（MLX 和 MacBert）"""
     global model
     
     try:
@@ -173,10 +173,15 @@ def initialize_model():
         print(f"✅ MLX 模型初始化成功 (耗时: {load_time:.2f}秒)")
         
         # 预热模型
-        print("🔥 预热模型...")
+        print("🔥 预热 MLX 模型...")
         warmup_audio = np.zeros(16000, dtype=np.float32)  # 1秒静音
         _ = model.transcribe(warmup_audio, language="auto")
-        print("✅ 模型预热完成")
+        print("✅ MLX 模型预热完成")
+        
+        # 初始化文本纠错模型
+        print("⏳ 正在初始化文本纠错模型...")
+        get_corrector()  # 这将触发 MacBertCorrector 的初始化
+        print("✅ 文本纠错模型初始化完成")
         
         return model
         
@@ -195,7 +200,7 @@ def initialize_model():
 async def startup_event():
     """应用启动时初始化模型"""
     try:
-        initialize_model()
+        initialize_models()
         print(f"🎉 服务启动成功！访问 http://{config.HOST}:{config.PORT}/docs 查看 API 文档")
     except Exception as e:
         config.logger.error(f"启动失败: {e}")
@@ -453,7 +458,7 @@ def process_audio_file(file_path: str, language: str = "auto", enable_punctuatio
 @app.post("/v1/audio/transcriptions")
 async def transcribe_audio(
     file: UploadFile = File(...),
-    model: str = Form(default="whisper-1"),
+    model_name: str = Form(default="sensevoice-mlx", alias="model"),
     language: Optional[str] = Form(default=None),
     prompt: Optional[str] = Form(default=None),
     response_format: str = Form(default="json"),
@@ -467,7 +472,7 @@ async def transcribe_audio(
     
     Args:
         file: 音频文件
-        model: 模型名称（兼容性参数，实际使用 MLX 模型）
+        model_name: 模型名称（兼容性参数，实际使用 MLX 模型）
         language: 语言代码 (zh/en/ja/ko/yue/auto)
         prompt: 提示文本（暂不支持）
         response_format: 响应格式 (json/text/srt/verbose_json/vtt)
@@ -476,6 +481,9 @@ async def transcribe_audio(
         enable_punctuation: 是否启用标点恢复（None 时使用默认设置）
         enable_correction: 是否启用MacBert文本纠错（默认启用）
     """
+    
+    # 记录参数使用情况（用于兼容性检查）
+    _ = model_name, prompt, timestamp_granularities  # 兼容性参数，不实际使用
     
     # 检查文件大小
     if file.size and file.size > config.MAX_FILE_SIZE:
@@ -582,7 +590,7 @@ async def transcribe_audio(
 @app.post("/v1/audio/translations")
 async def translate_audio(
     file: UploadFile = File(...),
-    model: str = Form(default="whisper-1"),
+    model_name: str = Form(default="sensevoice-mlx", alias="model"),
     prompt: Optional[str] = Form(default=None),
     response_format: str = Form(default="json"),
     temperature: float = Form(default=0.0)
@@ -593,10 +601,13 @@ async def translate_audio(
     注意：SenseVoice 不直接支持翻译，此端点返回转录结果
     """
     
+    # 记录参数使用情况（用于兼容性检查）
+    _ = model_name  # 兼容性参数，不实际使用
+    
     # 使用转录功能
     result = await transcribe_audio(
         file=file,
-        model=model,
+        model_name="sensevoice-mlx",
         language="auto",  # 自动检测语言
         prompt=prompt,
         response_format=response_format,
