@@ -15,7 +15,8 @@ from datetime import datetime
 
 from fastapi import FastAPI, Form, UploadFile, File, HTTPException, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from pycorrector import MacBertCorrector
 import numpy as np
 import librosa
 import soundfile as sf
@@ -68,15 +69,31 @@ class Config:
     def _setup_logging(self):
         """配置日志系统"""
         log_file = os.path.join(self.TMP_DIR, 'api_mlx.log')
-        logging.basicConfig(
-            level=getattr(logging, self.LOG_LEVEL.upper()),
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.StreamHandler(),
-                logging.FileHandler(log_file)
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
+        
+        # 创建专用的logger
+        self.logger = logging.getLogger('sensevoice_mlx')
+        self.logger.setLevel(getattr(logging, self.LOG_LEVEL.upper()))
+        
+        # 防止日志传播到root logger，避免重复输出
+        self.logger.propagate = False
+        
+        # 避免重复添加handler
+        if not self.logger.handlers:
+            # 控制台handler
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            console_formatter = logging.Formatter('%(levelname)s:%(name)s:%(message)s')
+            console_handler.setFormatter(console_formatter)
+            
+            # 文件handler
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setLevel(logging.INFO)
+            file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            file_handler.setFormatter(file_formatter)
+            
+            # 添加handlers
+            self.logger.addHandler(console_handler)
+            self.logger.addHandler(file_handler)
     
     def print_config(self):
         """打印当前配置"""
@@ -108,6 +125,25 @@ app_start_time = time.time()
 
 # 全局模型实例
 model: Optional[VoiceMLX] = None
+corrector_model: Optional[MacBertCorrector] = None
+
+def get_corrector() -> MacBertCorrector:
+    """
+    获取 MacBertCorrector 模型实例（懒加载）。
+    模型在首次调用时初始化并缓存。
+    """
+    global corrector_model
+    if corrector_model is None:
+        config.logger.info("🔧 正在首次初始化 MacBertCorrector 文本纠错模型...")
+        config.logger.info("📦 模型来源: shibing624/macbert4csc-base-chinese")
+        start_time = time.time()
+        # 注意：MacBertCorrector 默认会从 huggingface 下载模型，
+        # 也可以指定本地模型路径 model_name_or_path
+        corrector_model = MacBertCorrector()
+        load_time = time.time() - start_time
+        config.logger.info(f"✅ MacBertCorrector 模型初始化成功 (耗时: {load_time:.2f}秒)")
+        config.logger.info("🎯 文本纠错功能已就绪")
+    return corrector_model
 
 
 def initialize_model():
@@ -129,9 +165,9 @@ def initialize_model():
         )
         
         if enable_punctuation:
-            logger.info("✅ 标点恢复功能已启用")
+            config.logger.info("✅ 标点恢复功能已启用")
         else:
-            logger.info("ℹ️ 标点恢复功能未启用（设置 SENSEVOICE_ENABLE_PUNCTUATION=true 以启用）")
+            config.logger.info("ℹ️ 标点恢复功能未启用（设置 SENSEVOICE_ENABLE_PUNCTUATION=true 以启用）")
         
         load_time = time.time() - start_time
         print(f"✅ MLX 模型初始化成功 (耗时: {load_time:.2f}秒)")
@@ -167,6 +203,12 @@ async def startup_event():
 
 
 # API 响应模型
+class CorrectionResult(BaseModel):
+    """文本纠错结果模型"""
+    source: str
+    target: str
+    errors: List[tuple] = Field(default_factory=list)
+
 class TranscriptionResponse(BaseModel):
     """转录响应模型"""
     text: str
@@ -174,6 +216,7 @@ class TranscriptionResponse(BaseModel):
     duration: Optional[float] = None
     words: Optional[List[Dict[str, Any]]] = None
     segments: Optional[List[Dict[str, Any]]] = None
+    correction: Optional[CorrectionResult] = None # 新增字段
 
 
 class TranslationResponse(BaseModel):
@@ -241,6 +284,118 @@ def format_text(text: str, response_format: str = "json") -> str:
     return text
 
 
+def correct_text_with_macbert(text: str) -> Dict[str, Any]:
+    """
+    使用 MacBert 模型对文本进行纠错。
+
+    Args:
+        text: 待纠错的原始文本。
+
+    Returns:
+        一个包含纠错结果的字典。
+    """
+    config.logger.info(f"🔍 开始文本纠错处理...")
+    config.logger.info(f"📝 原始文本: {text}")
+    config.logger.info(f"📏 文本长度: {len(text)} 字符")
+    
+    # 检查文本长度，对于5个字符以下的短文本跳过纠错
+    if len(text.strip()) < 5:
+        config.logger.info("🛡️ 文本过短（<5字符），跳过纠错以避免误判")
+        return {
+            "source": text,
+            "target": text,
+            "errors": [],
+            "inference_time": 0.0,
+            "skip_reason": "文本过短（<5字符）"
+        }
+    
+    try:
+        corrector = get_corrector()
+        config.logger.info("⚡ 正在执行 MacBert 文本纠错...")
+        start_time = time.time()
+        result = corrector.correct(text)
+        inference_time = time.time() - start_time
+        
+        corrected_text = result.get('target', text)
+        errors = result.get('errors', [])
+        
+        # 对纠错结果进行质量检查
+        if _should_accept_correction(text, corrected_text, errors):
+            config.logger.info(f"✅ 纠错处理完成 (耗时: {inference_time:.3f}秒)")
+            config.logger.info(f"📝 纠错结果: {corrected_text}")
+            config.logger.info(f"🔧 发现错误: {len(errors)} 个")
+            
+            if errors:
+                config.logger.info("📋 错误详情:")
+                for i, error in enumerate(errors, 1):
+                    if len(error) >= 3:
+                        wrong_char, correct_char, position = error[0], error[1], error[2]
+                        config.logger.info(f"   {i}. 位置{position}: '{wrong_char}' → '{correct_char}'")
+                    else:
+                        config.logger.info(f"   {i}. {error}")
+            else:
+                config.logger.info("✨ 文本无需纠错，质量良好")
+
+            # 将 pycorrector 的输出格式化
+            return {
+                "source": result.get('source', text),
+                "target": corrected_text,
+                "errors": errors,
+                "inference_time": inference_time
+            }
+        else:
+            config.logger.info(f"🚫 纠错结果质量检查未通过，保持原文")
+            config.logger.info(f"📝 原始文本: {text}")
+            config.logger.info(f"📝 模型建议: {corrected_text}")
+            config.logger.info("✨ 保留原始文本以避免错误纠正")
+            
+            return {
+                "source": text,
+                "target": text,
+                "errors": [],
+                "inference_time": inference_time,
+                "rejected_suggestion": corrected_text
+            }
+            
+    except Exception as e:
+        config.logger.error(f"❌ MacBert 文本纠错失败: {e}")
+        config.logger.info("🔄 启用容错模式，返回原始文本")
+        # 在纠错失败时，优雅地返回原始文本，不中断主流程
+        return {
+            "source": text,
+            "target": text,
+            "errors": [],
+            "error_message": str(e)
+        }
+
+
+def _should_accept_correction(original: str, corrected: str, errors: List) -> bool:
+    """
+    检查纠错结果是否应该被接受
+    
+    Args:
+        original: 原始文本
+        corrected: 纠错后文本
+        errors: 错误列表
+        
+    Returns:
+        是否接受纠错结果
+    """
+    # 如果没有修改，直接接受
+    if original == corrected:
+        return True
+    
+    # 检查修改的合理性 - 如果修改过多，可能是误判
+    if len(errors) > len(original) // 2:
+        return False
+    
+    # 检查是否为全文替换（可能是模型错误）
+    if len(errors) == len(original) and len(original) <= 8:
+        return False
+    
+    return True
+
+
 def process_audio_file(file_path: str, language: str = "auto", enable_punctuation: Optional[bool] = None) -> Dict[str, Any]:
     """处理音频文件
     
@@ -304,7 +459,8 @@ async def transcribe_audio(
     response_format: str = Form(default="json"),
     temperature: float = Form(default=0.0),
     timestamp_granularities: Optional[List[str]] = Form(default=None),
-    enable_punctuation: Optional[bool] = Form(default=None)
+    enable_punctuation: Optional[bool] = Form(default=None),
+    enable_correction: bool = Form(default=True) # 新增参数
 ):
     """
     转录音频文件（OpenAI Whisper API 兼容）
@@ -318,6 +474,7 @@ async def transcribe_audio(
         temperature: 温度参数（暂不支持）
         timestamp_granularities: 时间戳粒度（暂不支持）
         enable_punctuation: 是否启用标点恢复（None 时使用默认设置）
+        enable_correction: 是否启用MacBert文本纠错（默认启用）
     """
     
     # 检查文件大小
@@ -376,6 +533,17 @@ async def transcribe_audio(
                 "language": result.get("language", "auto"),
                 "duration": result.get("duration", 0)
             }
+
+            # 如果启用了文本纠错，则执行并添加到响应中
+            if enable_correction:
+                config.logger.info("🎯 启用文本纠错功能")
+                correction_result = correct_text_with_macbert(text)
+                response["correction"] = correction_result
+                config.logger.info("📊 纠错结果已添加到响应中")
+                # 可选：用纠错后的文本覆盖原始文本
+                # response["text"] = correction_result["target"]
+            else:
+                config.logger.info("⚠️  文本纠错功能已禁用")
             
             if response_format == "verbose_json":
                 # 添加更多详细信息
@@ -572,7 +740,7 @@ if __name__ == "__main__":
     
     # 运行服务器
     uvicorn.run(
-        "openai_whisper_api_mlx:app",
+        app,
         host=config.HOST,
         port=config.PORT,
         reload=False,  # 生产环境设为 False
